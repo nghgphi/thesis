@@ -76,6 +76,7 @@ def life_experience(model, data, ids, input_size, n_outputs, n_tasks, args):
 
     # train/val/test order by ids
     # t: the real task id
+    o_model = copy.deepcopy(model.net.state_dict())
     for i, t in enumerate(ids):
 
         Model = importlib.import_module('model.' + args.model)
@@ -135,31 +136,21 @@ def life_experience(model, data, ids, input_size, n_outputs, n_tasks, args):
         if args.earlystop:
             best_loss = np.inf
             best_acc = -1.0
-            best_acc_2 = -1.0
             patience = args.lr_patience
-            patience_2 = patience
             best_model = copy.deepcopy(model.net.state_dict())
             model_2.net_copy.load_state_dict(best_model)
         prog_bar = tqdm(range(args.n_epochs))
         for ep in prog_bar:
             # train
             model.epoch += 1
-            model_2.epoch += 1
             model.real_epoch = ep
 
             model.net.train()
-            model_2.net.train()
             idx = np.arange(xtrain.size(0))
             np.random.shuffle(idx)
             idx = torch.LongTensor(idx)
             
             train_loss = 0.0
-            train_loss_2 = 0.0
-            loss_2 = 0.0
-            raw_term = 0.0
-            beta_term = 0.0
-            gamma_term = 0.0
-            gradnorm_term = 0.0
 
             # Loop batches
             for bi in range(0, len(idx), args.batch_size):
@@ -172,38 +163,14 @@ def life_experience(model, data, ids, input_size, n_outputs, n_tasks, args):
                 v_y = ytrain[pos]
 
                 metadata = model.observe(v_x, v_y, t)
-                if i > 0:
-                    # model_2.net_copy.load_state_dict()
-                    metadata_2 = model_2.observe(v_x, v_y, t, one_task_only=True, copy_net=model_2.net_copy)
-                    loss_2 = metadata_2['loss']
-
-                # print(f"Loss: {loss}")
                 loss = metadata['loss']
                 train_loss += loss * len(v_x)
-                train_loss_2 += loss_2 * len(v_x)
-                # if metadata is not None:
-                #     raw_term += metadata["raw_loss"]
-                #     beta_term += metadata["beta_term"]
-                #     gamma_term += metadata["gamma_term"]
-                #     gradnorm_term += metadata["grad_norm"]
-                # print(f"Train loss: {train_loss}, {len(v_x)}")
-            
-
             train_loss = train_loss / len(xtrain)
-            train_loss_2 = train_loss_2 / len(xtrain)
-            # raw_term = raw_term / len(xtrain)
-            # beta_term = beta_term / len(xtrain)
-            # train_loss = train_loss / len(xtrain)
-            # gradnorm_term = gradnorm_term / len(xtrain)
-            writer.add_scalar(f"1.Train-LOSS/{data[t]['name']}", round(train_loss.item(), 5), model.epoch)
 
             # if use early stop, we need to adapt lr and store the best model
             if args.earlystop:
                 # Valid
-                valid_loss, valid_acc = eval(model, xvalid, yvalid, t, args)
-                valid_loss_2, valid_acc_2 = eval(model_2, xvalid, yvalid, t, args)
-                writer.add_scalar(f"2.Val-LOSS/{data[t]['name']}", round(valid_loss.item(), 5), model.epoch)
-                writer.add_scalar(f"2.Val-ACC/{data[t]['name']}", 100 * valid_acc, model.epoch)
+                _, valid_acc = eval(model, xvalid, yvalid, t, args)
 
                 if valid_acc > best_acc:
                     best_acc = valid_acc
@@ -224,50 +191,105 @@ def life_experience(model, data, ids, input_size, n_outputs, n_tasks, args):
                             if len(model.M_vec) > 0 and args.method in ['dgpm', 'xdgpm']:
                                 model.eta2 = model.eta2 / args.lr_factor
                                 model.update_opt_lambda(model.eta2)
-                if valid_acc_2 > best_acc_2:
-                    best_acc_2 = valid_acc_2
-                    patience_2 = args.lr_patience
-                    best_model_2 = copy.deepcopy(model_2.net.state_dict())
-                else:
-                    patience_2 -= 1
-                    if patience_2 <= 0:
-                        lr2 /= args.lr_factor
-                        if lr2 < args.lr_min:
-                            break
-                        patience_2 = args.lr_patience
-                        model_2.update_optimizer(lr2)
-                        
 
                 prog_bar.set_description(
-                    "Task: {} | Epoch: {}/{} | train_loss={:.3f}| train_loss_2={:.3f} | acc={:5.1f} acc_model2={:5.1f} |".format(
-                        i, ep + 1, model.n_epochs, train_loss, train_loss_2, 100 * valid_acc, 100 * valid_acc_2)
+                    "1st model => Task: {} | Epoch: {}/{} | train_loss={:.3f} | acc={:5.1f}|".format(
+                        i, ep + 1, model.n_epochs, train_loss, 100 * valid_acc)
                 )
                 
             else:
-                prog_bar.set_description("Task: {} | Epoch: {}/{} | time={:2.2f}s | Train: loss={:.3f}, loss_2:{:.3f}| ".format(
-                        i, ep + 1, model.n_epochs, time.time() - clock0, round(train_loss.item(), 5), round(train_loss_2.item(), 5))
+                prog_bar.set_description("Task: {} | Epoch: {}/{} | time={:2.2f}s | Train: loss={:.3f}| ".format(
+                        i, ep + 1, model.n_epochs, time.time() - clock0, round(train_loss.item(), 5))
                     )
-            # model.scheduler.step()
+        
+        gpm_model = copy.deepcopy(model.net.state_dict())
+        if i > 0:
+            print("Train second model")
+            model.net.load_state_dict(o_model)
+            model.update_optimizer(lr)
+            if args.earlystop:
+                best_loss = np.inf
+                best_acc = -1.0
+                patience = args.lr_patience
+                best_model = copy.deepcopy(model.net.state_dict())
+                model_2.net_copy.load_state_dict(best_model)
+            prog_bar = tqdm(range(args.n_epochs))
+            
+            for ep in prog_bar:
+            # train
+                model.epoch += 1
+                model.real_epoch = ep
 
-            # interpolate weight of model and model_2
-            if i > 0:
-                if args.earlystop:
-                    model.net.load_state_dict(copy.deepcopy(best_model))
-                    model_2.net.load_state_dict(copy.deepcopy(best_model_2))
-                opt_w_1 = model.net.state_dict()
-                opt_w_2 = model_2.net.state_dict()
-                final_model = model.net.state_dict()
-                beta = 1.0 / (t+1)
+                model.net.train()
+                idx = np.arange(xtrain.size(0))
+                np.random.shuffle(idx)
+                idx = torch.LongTensor(idx)
+                
+                train_loss = 0.0
+                reg_term = 0.0
 
-                for key in model.net.state_dict():
-                    if 'lambda' not in key:
-                        # print(f'Interpolate on layer: {key}')
-                        final_model[key] = beta * opt_w_2[key] + (1 - beta) * opt_w_1[key]
-                model.net.load_state_dict(final_model)
-            else:
-                # print('no interpolate of two networks')
+                # Loop batches
+                for bi in range(0, len(idx), args.batch_size):
+                    if bi + args.batch_size <= len(idx):
+                        pos = idx[bi: bi + args.batch_size]
+                    else:
+                        pos = idx[bi:]
+
+                    v_x = xtrain[pos]
+                    v_y = ytrain[pos]
+
+                    metadata = model.observe(v_x, v_y, t, train_gpm=False, old_model=o_model)
+                    loss = metadata['loss']
+                    train_loss += loss * len(v_x)
+                    reg_term += metadata['reg_term']
+                train_loss /= len(xtrain)
+                reg_term /= len(xtrain)
+
+                # if use early stop, we need to adapt lr and store the best model
                 if args.earlystop:
-                    model.net.load_state_dict(copy.deepcopy(best_model))
+                    # Valid
+                    _, valid_acc = eval(model, xvalid, yvalid, t, args)
+
+                    if valid_acc > best_acc:
+                        best_acc = valid_acc
+                        best_model = copy.deepcopy(model.net.state_dict())
+                        patience = args.lr_patience
+                    else:
+                        patience -= 1
+                        if patience <= 0:
+                            lr /= args.lr_factor
+                            print(' lr={:.1e} |'.format(lr), end='')
+                            if lr < args.lr_min:
+                                break
+                            patience = args.lr_patience
+                            model.update_optimizer(lr)
+                            if args.model == 'fsdgpm' or args.model == 'sam':
+                                if args.model == 'fsdgpm':
+                                    model.eta1 = model.eta1 / args.lr_factor
+                                if len(model.M_vec) > 0 and args.method in ['dgpm', 'xdgpm']:
+                                    model.eta2 = model.eta2 / args.lr_factor
+                                    model.update_opt_lambda(model.eta2)
+
+                    prog_bar.set_description(
+                        "2nd model => Task: {} | Epoch: {}/{} | train_loss={:.3f}, reg_term={:.3f} | acc={:5.1f}|".format(
+                            i, ep + 1, model.n_epochs, train_loss, reg_term, 100 * valid_acc)
+                    )
+                    
+                else:
+                    prog_bar.set_description("Task: {} | Epoch: {}/{} | time={:2.2f}s | Train: loss={:.3f}| ".format(
+                            i, ep + 1, model.n_epochs, time.time() - clock0, round(train_loss.item(), 5))
+                        )
+            no_gpm_model = copy.deepcopy(model.net.state_dict())
+            
+            final_model = copy.deepcopy(model.net.state_dict())
+            beta = 1.0 / (i+1)
+
+            for key in model.net.state_dict():
+                if 'lambda' not in key:
+                    # print(f'Interpolate on layer: {key}')
+                    final_model[key] = beta * gpm_model[key] + (1 - beta) * no_gpm_model[key]
+            model.net.load_state_dict(final_model)
+
 
 
 
@@ -429,6 +451,10 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
 
     result_test_a = []
     result_test_t = []
+    result_test_a_1 = []
+    result_test_t_1 = []
+    result_test_a_2 = []
+    result_test_t_2 = []
     test_tasks = inc_loader.get_tasks("test")
     val_tasks = inc_loader.get_tasks("val")
 
@@ -488,47 +514,31 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
             patience = args.lr_patience
             model_2.net_copy.load_state_dict(best_model)
 
+        o_model = copy.deepcopy(model.net.state_dict())
 
         for ep in range(args.n_epochs):
             model.epoch += 1
-            model_2.epoch += 1
             model.real_epoch = ep
             train_loss = 0.0
-            train_loss_2 = 0.0
-            loss_2 = 0.0
-
             model.net.train()
-            model_2.net.train()
-            model_2.net_copy.train()
             prog_bar = tqdm(train_loader)
+
             for (k, (v_x, v_y)) in enumerate(prog_bar):
                 if args.cuda:
                     v_x = v_x.cuda()
                     v_y = v_y.cuda()
-
-                metadata = model.observe(v_x, v_y, task_info['task'])
+                # train gpm_model
+                metadata = model.observe(v_x, v_y, task_info['task'], train_gpm=True)
                 loss = metadata['loss']
                 train_loss += loss * len(v_x)
 
-                if i > 0:
-                    metadata_2 = model_2.observe(v_x, v_y, task_info['task'])
-                    loss_2 = metadata_2['loss']
-                    
-
             train_loss = train_loss / len(train_loader.dataset)
-            train_loss_2 = loss_2 * len(v_x)
 
             writer.add_scalar(f"1.Train-LOSS/Task_{task_info['task']}", round(train_loss.item(), 5), model.epoch)
 
             if args.earlystop:
                 val_loss, val_acc = evaluator(model, val_tasks, args, task_info['task'])
                 valid_loss = val_loss[-1].item()
-
-                val_loss_2, val_acc_2 = evaluator(model_2, val_tasks, args, task_info['task'])
-                valid_loss_2 = val_loss_2[-1].item()
-
-
-                
 
                 writer.add_scalar(f"2.Val-LOSS/Task_{task_info['task']}", round(valid_loss, 5), model.epoch)
                 writer.add_scalar(f"2.Val-ACC/Task_{task_info['task']}", 100 * val_acc[-1], model.epoch)
@@ -553,21 +563,8 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
                                 model.eta2 = model.eta2 / args.lr_factor
                                 model.update_opt_lambda(model.eta2)
                 
-                if valid_loss_2 < best_loss_2:
-                    best_loss_2 = valid_loss_2
-                    best_model_2 = copy.deepcopy(model_2.net.state_dict())
-                    patience_2 = args.lr_patience
-                else:
-                    patience_2 -= 1
-                    if patience_2 <= 0:
-                        lr2 /= args.lr_factor
-                        print('** lr2={:.1e} **|'.format(lr2), end='')
-                        if lr2 < args.lr_min:
-                            break
-                        patience_2 = args.lr_patience
-                        model_2.update_optimizer(lr2)
                 prog_bar.set_description(
-                    "Task: {} | Epoch: {}/{} | time={:2.2f}s | Train: loss={:.3f} | Valid: loss={:.3f}, acc={:5.1f}% |".format(
+                    "Task: {} | Epoch: {}/{} | p_model: time={:2.2f}s | Train: loss={:.3f} | Valid: loss={:.3f}, acc={:5.1f}% |".format(
                         task_info['task'], ep + 1, model.n_epochs, model.iter, time.time() - clock0,
                         round(train_loss.item(), 5), round(valid_loss, 5), 100 * val_acc[-1])
                 )
@@ -577,24 +574,10 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
                         ep + 1, model.n_epochs, model.iter, time.time() - clock0, round(train_loss.item(), 5))
                 )
             if args.earlystop:
-                if i > 0:
-                    model.net.load_state_dict(copy.deepcopy(best_model))
-                    model_2.net.load_state_dict(copy.deepcopy(best_model_2))
-                    opt_w_1 = model.net.state_dict()
-                    opt_w_2 = model_2.net.state_dict()
-                    final_model = model.net.state_dict()
-                    beta = 1.0 / (i+1)
+                model.net.load_state_dict(copy.deepcopy(best_model))
+        gpm_model = copy.deepcopy(model.net.state_dict())
 
-                    for key in model.net.state_dict():
-                        if 'lambda' not in key:
-                            # print(f'Interpolate on layer: {key}')
-                            final_model[key] = beta * opt_w_2[key] + (1 - beta) * opt_w_1[key]
-                    model.net.load_state_dict(final_model)
-                else:
-                    model.net.load_state_dict(copy.deepcopy(best_model))
-
-
-        # Test
+        # Test first model
         clock1 = time.time()
         t_loss, t_acc = evaluator(model, test_tasks, args)
         result_test_a.append(t_acc)
@@ -603,18 +586,127 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
         avg = sum(t_acc[:(i + 1)]) / (i + 1)
         bwt = np.mean((np.array(t_acc[:(i+1)]) - np.diag(result_test_a[:(i+1)])))
 
-        writer.add_scalar(f"0.Test/Avg-ACC", 100 * avg, i)
-        writer.add_scalar(f"0.Test/Avg-BWT", 100 * bwt, i)
-
-        for j in range(len(result_test_a)):
-            writer.add_scalar(f"0.Test-LOSS/Task_{j}", t_loss[j].item(), i)
-            writer.add_scalar(f"0.Test-ACC/Task_{j}", 100 * t_acc[j].item(), i)
-            writer.add_scalar(f"0.Test-BWT/Task_{j}", 100 * (t_acc[j] - result_test_a[j][j]), i)
-
         print('-' * 60)
-        print('Test Result: ACC={:5.3f}%, BWT={:5.3f}%, Elapsed time = {:.2f} s'.format(100 * avg, 100 * bwt,
+        print('1st Test Result: ACC={:5.3f}%, BWT={:5.3f}%, Elapsed time = {:.2f} s'.format(100 * avg, 100 * bwt,
                                                                                         time.time() - clock1))
         print('-' * 60)
+
+        if i >= 0:
+            # Train second model without gpm
+            model.net.load_state_dict(o_model)
+            for ep in range(args.n_epochs):
+
+                model.epoch += 1
+                model.real_epoch = ep
+                model.update_optimizer(lr)
+
+                train_loss = 0.0
+                reg_term = 0.0
+                model.net.train()
+                prog_bar = tqdm(train_loader)
+
+                for (k, (v_x, v_y)) in enumerate(prog_bar):
+                    if args.cuda:
+                        v_x = v_x.cuda()
+                        v_y = v_y.cuda()
+
+                    # train gpm_model
+                    metadata = model.observe(v_x, v_y, task_info['task'], train_gpm=False, old_model=o_model)
+                    loss = metadata['loss']
+                    train_loss += loss * len(v_x)
+                    if task_info['task'] > 0:
+                        reg_term += model.reg_term.item() * len(v_x)
+                
+                train_loss = train_loss / len(train_loader.dataset)
+                reg_term = reg_term / len(train_loader.dataset)
+                writer.add_scalar(f"1.Train-LOSS/Task_{task_info['task']}", round(train_loss.item(), 5), model.epoch)
+
+                if args.earlystop:
+                    val_loss, val_acc = evaluator(model, val_tasks, args, task_info['task'])
+                    valid_loss = val_loss[-1].item()
+
+                    writer.add_scalar(f"2.Val-LOSS/Task_{task_info['task']}", round(valid_loss, 5), model.epoch)
+                    writer.add_scalar(f"2.Val-ACC/Task_{task_info['task']}", 100 * val_acc[-1], model.epoch)
+
+                    if valid_loss < best_loss:
+                        best_loss = valid_loss
+                        best_model = copy.deepcopy(model.net.state_dict())
+                        patience = args.lr_patience
+                    else:
+                        patience -= 1
+                        if patience <= 0:
+                            lr /= args.lr_factor
+                            print('** lr={:.1e} **|'.format(lr), end='')
+                            if lr < args.lr_min:
+                                break
+                            patience = args.lr_patience
+                            model.update_optimizer(lr)
+                    
+                    prog_bar.set_description(
+                        "Task: {} | Epoch: {}/{} | q_model: time={:2.2f}s | Train: loss={:.3f} | reg_term={:.3f}, acc={:5.1f}% |".format(
+                            task_info['task'], ep + 1, model.n_epochs, model.iter, time.time() - clock0,
+                            round(train_loss.item(), 5), round(reg_term, 5), 100 * val_acc[-1])
+                    )
+                else:
+                    prog_bar.set_description(
+                        "Task: {} | Epoch: {}/{} | time={:2.2f}s | Train: loss={:.3f} |".format(task_info['task'],
+                            ep + 1, model.n_epochs, model.iter, time.time() - clock0, round(train_loss.item(), 5))
+                    )
+                if args.earlystop:
+                    model.net.load_state_dict(copy.deepcopy(best_model))
+            no_gpm_model = copy.deepcopy(model.net.state_dict())
+            # Test second model
+
+            clock1 = time.time()
+            t_loss, t_acc_1 = evaluator(model, test_tasks, args)
+            result_test_a_1.append(t_acc_1)
+            result_test_t_1.append(task_info["task"])
+
+            avg = sum(t_acc_1[:(i + 1)]) / (i + 1)
+            # bwt = np.mean((np.array(t_acc_1[:(i+1)]) - np.diag(result_test_a_1[:(i+1)])))
+            print((np.array(t_acc_1[:(i+1)]).shape))
+            print(np.diag(result_test_a_1[:(i+1)]).shape)
+            bwt = np.mean((np.array(t_acc_1[:(i+1)]) - np.diag(result_test_a_1[:(i+1)])))
+
+
+
+            print('-' * 60)
+            print('Test Result: ACC={:5.3f}%, BWT={:5.3f}%, Elapsed time = {:.2f} s'.format(100 * avg, 100 * bwt,
+                                                                                            time.time() - clock1))
+            print('-' * 60)
+
+
+            final_model = copy.deepcopy(model.net.state_dict())
+            beta = 1.0 / (i+1)
+
+            for key in model.net.state_dict():
+                if 'lambda' not in key:
+                    # print(f'Interpolate on layer: {key}')
+                    final_model[key] = beta * gpm_model[key] + (1 - beta) * no_gpm_model[key]
+            model.net.load_state_dict(final_model)
+
+            # Test third model
+
+            clock1 = time.time()
+            t_loss, t_acc_2 = evaluator(model, test_tasks, args)
+            result_test_a_2.append(t_acc_2)
+            result_test_t_2.append(task_info["task"])
+
+            avg = sum(t_acc_2[:(i + 1)]) / (i + 1)
+            bwt = np.mean((np.array(t_acc_2[:(i+1)]) - np.diag(result_test_a_2[:(i+1)])))
+
+            # writer.add_scalar(f"0.Test/Avg-ACC", 100 * avg, i)
+            # writer.add_scalar(f"0.Test/Avg-BWT", 100 * bwt, i)
+
+            # for j in range(len(result_test_a)):
+            #     writer.add_scalar(f"0.Test-LOSS/Task_{j}", t_loss[j].item(), i)
+            #     writer.add_scalar(f"0.Test-ACC/Task_{j}", 100 * t_acc[j].item(), i)
+            #     writer.add_scalar(f"0.Test-BWT/Task_{j}", 100 * (t_acc[j] - result_test_a[j][j]), i)
+
+            print('-' * 60)
+            print('Interpolated Model Test Result: ACC={:5.3f}%, BWT={:5.3f}%, Elapsed time = {:.2f} s'.format(100 * avg, 100 * bwt,
+                                                                                            time.time() - clock1))
+            print('-' * 60)
 
         # Update Memory of Feature Space
         if args.model in ['fsdgpm', 'sam']:
@@ -645,7 +737,7 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
         100 * avg, 100 * bwt, time_spent / 60))
     print('*' * 100)
 
-    return torch.Tensor(result_test_t), torch.Tensor(result_test_a), time_spent
+    return torch.Tensor(result_test_t_2), torch.Tensor(result_test_a_2), time_spent
 
 
 def main():

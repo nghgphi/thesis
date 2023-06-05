@@ -1,4 +1,22 @@
 '''
+    if i > 0:
+        model.net.load_state_dict(copy.deepcopy(best_model))
+        model_2.net.load_state_dict(copy.deepcopy(best_model_2))
+        opt_w_1 = model.net.state_dict()
+        opt_w_2 = model_2.net.state_dict()
+        final_model = model.net.state_dict()
+        beta = 1.0 / (i+1)
+
+        for key in model.net.state_dict():
+            if 'lambda' not in key:
+                # print(f'Interpolate on layer: {key}')
+                final_model[key] = beta * opt_w_2[key] + (1 - beta) * opt_w_1[key]
+        model.net.load_state_dict(final_model)
+    else:
+
+'''
+
+'''
 if self.args.regularized_loss == 'grad':
             self.reg_const = self.args.reg_gnorm
             grad_x = torch.autograd.grad(loss, x, only_inputs=True, create_graph=True)[0]

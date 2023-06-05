@@ -69,8 +69,8 @@ def save_results(args, result_test_t, result_test_a, model, spent_time):
     print(fname + ': ' + one_liner + ' # ' + str(spent_time))
 
     # save all results in binary file
-    torch.save((result_test_t, result_test_a, model.state_dict(),
-                test_stats, one_liner, args), fname + '.pt')
+    # torch.save((result_test_t, result_test_a, model.state_dict(),
+    #             test_stats, one_liner, args), fname + '.pt')
     return test_stats
 
 

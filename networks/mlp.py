@@ -20,6 +20,8 @@ class Learner(nn.Module):
         # number of representation matrix
         self.n_rep = 3
         self.multi_head = False
+        self.feature_output = None
+ 
 
     def forward(self, x, vars=None, svd=False):
         h = x.reshape(x.size(0), -1)
@@ -29,15 +31,22 @@ class Learner(nn.Module):
             h = self.relu(self.fc1(h))
             y.append(h)
             h = self.relu(self.fc2(h))
+            
+            self.feature_output = h
+            
             y.append(h)
         elif vars is not None:
             assert len(vars) == 3
             h = self.relu(F.linear(h, vars[0]))
             h = self.relu(F.linear(h, vars[1]))
+            self.feature_output = h
+
             y = F.linear(h, vars[2])
         else:
             h = self.relu(self.fc1(h))
             h = self.relu(self.fc2(h))
+            self.feature_output = h
+
             y = self.head(h)
 
         return y
