@@ -432,6 +432,7 @@ def life_experience_loader(model, inc_loader, args):
 
             if args.earlystop:
                 val_loss, val_acc = evaluator(model, val_tasks, args, task_info['task'])
+                print(f"val_acc: {val_acc}")
                 valid_loss = val_loss[-1].item()
 
                 writer.add_scalar(f"2.Val-LOSS/Task_{task_info['task']}", round(valid_loss, 5), model.epoch)

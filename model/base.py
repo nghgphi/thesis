@@ -42,12 +42,13 @@ class BaseNet(torch.nn.Module):
                     # print(args.activation)
                     network = importlib.import_module('networks.lenet_spectral')
             self.net = network.Learner(self.n_inputs, self.n_outputs, self.n_tasks, self.args)
-            self.net_copy = network.Learner(self.n_inputs, self.n_outputs, self.n_tasks, self.args)
-            self.dist = -1
+            self.net_old = network.Learner(self.n_inputs, self.n_outputs, self.n_tasks, self.args)
+            self.old_state = None
+            self.prev_task = 0
             
         if self.cuda:
             self.net = self.net.cuda()
-            self.net_copy = self.net_copy.cuda()
+            self.net_old = self.net_old.cuda()
 
         if self.net.multi_head:
             self.nc_per_task = int(n_outputs / n_tasks)
@@ -192,8 +193,6 @@ class BaseNet(torch.nn.Module):
         raw_loss = loss / len(y)
         metadata = {
             'loss': raw_loss,
-            'cur_grad': grad_cur_task, 
-            'prev_grad': grad_prev_tasks
         }
         return metadata
 

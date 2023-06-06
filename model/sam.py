@@ -35,9 +35,12 @@ class Net(BaseNet):
         return output
 
 
-    def observe(self, x, y, t, train_gpm=True, old_model=None):
+    def observe(self, x, y, t, train_gpm=True):
         if t != self.current_task:
             self.current_task = t
+        self.net.train()
+        self.net_old.eval()
+        reg_terms = []
         for pass_itr in range(self.glances):
             self.iter += 1
             self.zero_grads()
@@ -53,65 +56,59 @@ class Net(BaseNet):
             fast_weights = self.compute_w_adv(x, y, t, fast_weights)
             metadata = self.meta_loss(bx, by, bt, fast_weights)
             loss = metadata['loss']
-            metadata['reg_term'] = 0.0
+            # metadata['reg_term'] = 0.0
 
-            new_model = copy.deepcopy(self.net.state_dict())
-            forward_extra = False
-            if old_model is not None:
-                # print("AAAAAAAAAAAAAAAA")
-                forward_extra = True
-
+            if not train_gpm:
                 _ = self.net.forward(bx, fast_weights)
-                feature_out_1 = self.net.feature_output
-
-                # compute feature from old_model
-                self.net.load_state_dict(old_model)
-                _ = self.net.forward(bx, fast_weights)
-                feature_out_2 = self.net.feature_output
+                z_new = self.net.feature_output
+                _ = self.net_old.forward(bx)
+                z_old = self.net_old.feature_output
 
                 # compute reg_term
-                assert feature_out_2.shape == feature_out_1.shape, f'Not the same shape: feature_out_2: {feature_out_2.shape} != feature_out_1: {feature_out_1.shape}'
-                print(f"f1 = {feature_out_1.shape}, f2 = {feature_out_2.shape}")
-                reg_term = 1.0 / x.size(0) * (torch.norm(feature_out_1.detach() - feature_out_2.detach()) ** 2)
-                print(reg_term.item())
+                assert z_new.shape == z_old.shape, f'Not the same shape: z_new: {z_new.shape} != z_old: {z_old.shape}'
+                # print(f"f1 = {z_new.shape}, f2 = {z_old.shape}")
+                reg_term = 1.0 / x.size(0) * (torch.norm(z_new - z_old) ** 2)
+                # print('reg_term = ', reg_term.item())
                 loss += self.eta3 * reg_term
-                self.reg_term = reg_term
                 metadata['loss'] = loss
-                metadata['reg_term'] = reg_term
-            if forward_extra: # turn back to current model
-                self.net.load_state_dict(new_model)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.grad_clip_norm)
-
-            if train_gpm and len(self.M_vec) > 0:
-                # update the lambdas
-                if self.args.method in ['dgpm', 'xdgpm']:
-                    torch.nn.utils.clip_grad_norm_(self.lambdas.parameters(), self.args.grad_clip_norm)
-                    if self.args.sharpness:
-                        self.opt_lamdas.step()
-                    else:
-                        self.opt_lamdas_step()
-
-                    for idx in range(len(self.lambdas)):
-                        self.lambdas[idx] = nn.Parameter(torch.sigmoid(self.args.tmp * self.lambdas[idx]))
-
-                # only use updated lambdas to update weight
+                reg_terms.append(reg_term)
+                loss.backward()
                 
-
-                # train on the rest of subspace spanned by GPM
-                self.train_restgpm()
-                # torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.grad_clip_norm)
+                torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.grad_clip_norm)
                 self.optimizer.step()
             else:
-                self.optimizer.step()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.grad_clip_norm)
+                if len(self.M_vec) > 0:
+                    # update the lambdas
+                    if self.args.method in ['dgpm', 'xdgpm']:
+                        torch.nn.utils.clip_grad_norm_(self.lambdas.parameters(), self.args.grad_clip_norm)
+                        if self.args.sharpness:
+                            self.opt_lamdas.step()
+                        else:
+                            self.opt_lamdas_step()
 
-                # self.zero_grads()
+                        for idx in range(len(self.lambdas)):
+                            self.lambdas[idx] = nn.Parameter(torch.sigmoid(self.args.tmp * self.lambdas[idx]))
+
+                    # only use updated lambdas to update weight
+                    
+
+                    # train on the rest of subspace spanned by GPM
+                    self.train_restgpm()
+                    # torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.grad_clip_norm)
+                    self.optimizer.step()
+                else:
+                    self.optimizer.step()
+
+                if self.real_epoch == 0:
+                    self.push_to_mem(x, y, torch.tensor(t))
+                self.zero_grads()
 
                 # only sample and push to replay buffer once for each task's stream
                 # instead of pushing every epoch
         
-            if old_model is None and self.real_epoch == 0:
-                self.push_to_mem(x, y, torch.tensor(t))
+        metadata['reg_term'] = torch.mean(torch.tensor(reg_terms)).item()    
 
         return metadata
     def compute_w_adv(self, x, y, t, fast_weights):
@@ -250,15 +247,3 @@ class Net(BaseNet):
         return
     def count_parameters(self):
         return sum(p.numel() for p in self.net.parameters())
-
-
-
-
-
-
-
-
-                
-
-                
-

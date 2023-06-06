@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import copy
 import torch.nn as nn
+import torch.nn.functional as F
 from datetime import datetime
 from tqdm import tqdm
 from sklearn.utils import shuffle
@@ -76,13 +77,10 @@ def life_experience(model, data, ids, input_size, n_outputs, n_tasks, args):
 
     # train/val/test order by ids
     # t: the real task id
-    o_model = copy.deepcopy(model.net.state_dict())
     for i, t in enumerate(ids):
-
-        Model = importlib.import_module('model.' + args.model)
-        model_2 = Model.Net(input_size, n_outputs, n_tasks, args)
-        model_2.net.load_state_dict(copy.deepcopy(model.net.state_dict()))
-        print(f"total params model_{i+1}: {model_2.count_parameters()}")
+        # compute old feature 
+        model.old_state = copy.deepcopy(model.net.state_dict())
+        model.net_old.load_state_dict(model.old_state)
 
         # Get data
         if i > 0:
@@ -138,7 +136,6 @@ def life_experience(model, data, ids, input_size, n_outputs, n_tasks, args):
             best_acc = -1.0
             patience = args.lr_patience
             best_model = copy.deepcopy(model.net.state_dict())
-            model_2.net_copy.load_state_dict(best_model)
         prog_bar = tqdm(range(args.n_epochs))
         for ep in prog_bar:
             # train
@@ -171,7 +168,7 @@ def life_experience(model, data, ids, input_size, n_outputs, n_tasks, args):
             if args.earlystop:
                 # Valid
                 _, valid_acc = eval(model, xvalid, yvalid, t, args)
-
+                print(f"valid_acc: {valid_acc}")
                 if valid_acc > best_acc:
                     best_acc = valid_acc
                     best_model = copy.deepcopy(model.net.state_dict())
@@ -205,21 +202,20 @@ def life_experience(model, data, ids, input_size, n_outputs, n_tasks, args):
         gpm_model = copy.deepcopy(model.net.state_dict())
         if i > 0:
             print("Train second model")
-            model.net.load_state_dict(o_model)
+            model.net.load_state_dict(model.old_state)
             model.update_optimizer(lr)
             if args.earlystop:
                 best_loss = np.inf
                 best_acc = -1.0
                 patience = args.lr_patience
                 best_model = copy.deepcopy(model.net.state_dict())
-                model_2.net_copy.load_state_dict(best_model)
             prog_bar = tqdm(range(args.n_epochs))
             
             for ep in prog_bar:
             # train
                 model.epoch += 1
                 model.real_epoch = ep
-
+                model.update_optimizer(lr)
                 model.net.train()
                 idx = np.arange(xtrain.size(0))
                 np.random.shuffle(idx)
@@ -238,7 +234,7 @@ def life_experience(model, data, ids, input_size, n_outputs, n_tasks, args):
                     v_x = xtrain[pos]
                     v_y = ytrain[pos]
 
-                    metadata = model.observe(v_x, v_y, t, train_gpm=False, old_model=o_model)
+                    metadata = model.observe(v_x, v_y, t, train_gpm=False)
                     loss = metadata['loss']
                     train_loss += loss * len(v_x)
                     reg_term += metadata['reg_term']
@@ -445,6 +441,74 @@ def eval_tasks(model, tasks, args, idx=-1):
                 result_lss.append(lss / x.size(0))
 
     return result_lss, result_acc
+def train_task_loader(model, task_info, evaluator, train_loader, val_tasks, use_gpm, args):
+    if use_gpm:
+        model.net.load_state_dict(model.old_state)
+        model.net_old.load_state_dict(model.old_state)
+    model.update_optimizer(args.lr)
+    # print(f'task_info: {task_info}')
+    if args.earlystop:
+        best_loss = np.inf
+        patience = args.lr_patience
+        best_model = copy.deepcopy(model.net.state_dict())
+
+    for ep in range(args.n_epochs):
+        model.epoch += 1
+        model.real_epoch = ep
+        train_loss = 0.0
+        reg_term = 0.0
+        model.net.train()
+        prog_bar = tqdm(train_loader)
+
+        for (k, (v_x, v_y)) in enumerate(prog_bar):
+            if args.cuda:
+                v_x = v_x.cuda()
+                v_y = v_y.cuda()
+            # train gpm_model
+            metadata = model.observe(v_x, v_y, task_info['task'], train_gpm=use_gpm)
+            loss = metadata['loss']
+            train_loss += loss * len(v_x)
+            
+            reg_term += metadata['reg_term'] * len(v_x)
+
+
+        train_loss = train_loss / len(train_loader.dataset)
+        reg_term /= len(train_loader.dataset)
+        if args.earlystop:
+            val_loss, val_acc = evaluator(model, val_tasks, args, task_info['task'])
+            valid_loss = val_loss[-1].item()
+            if valid_loss < best_loss:
+                best_loss = valid_loss
+                best_model = copy.deepcopy(model.net.state_dict())
+                patience = args.lr_patience
+            else:
+                patience -= 1
+                if patience <= 0:
+                    lr /= args.lr_factor
+                    print('** lr={:.1e} **|'.format(lr), end='')
+                    if lr < args.lr_min:
+                        break
+                    patience = args.lr_patience
+                    model.update_optimizer(lr)
+                    if args.model == 'fsdgpm' or args.model == 'sam':
+                        if args.model == 'fsdgpm':
+                            model.eta1 = model.eta1 / args.lr_factor
+                        if len(model.M_vec) > 0 and args.method in ['dgpm', 'xdgpm']:
+                            model.eta2 = model.eta2 / args.lr_factor
+                            model.update_opt_lambda(model.eta2)
+            
+            print(
+                "Use GPM model: {} => Task: {} | Epoch: {}/{} | Train: loss={:.3f}, reg_term: {:.3f} | Valid: loss={:.3f}, acc={:5.1f}% |".format(
+                    use_gpm, task_info['task'], ep + 1, model.n_epochs, round(train_loss.item(), 5), reg_term, round(valid_loss, 5), 100 * val_acc[-1])
+            )
+        else:
+            print(
+                "Task: {} | Epoch: {}/{} | Train: loss={:.3f} |".format(task_info['task'], ep + 1, model.n_epochs, round(train_loss.item(), 5))
+            )
+    if args.earlystop:
+        model.net.load_state_dict(copy.deepcopy(best_model))
+    
+    return model
 
 def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, args):
     time_start = time.time()
@@ -468,28 +532,9 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
 
     for i in range(inc_loader.n_tasks):
         task_info, train_loader, _, _ = inc_loader.new_task()
-
-        Model = importlib.import_module('model.' + args.model)
-
-        model_2 = Model.Net(input_size, n_outputs, n_tasks, args)
-        model_2.net.load_state_dict(copy.deepcopy(model.net.state_dict()))
-        print(f"total params model_{i+1}: {model_2.count_parameters()}")
-
         # Train
         clock0 = time.time()
-        # bn's parameters are only learned for the first task
-        # if args.freeze_bn and i == 1:
-        #     for m in model.net.modules():
-        #         if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm1d):
-        #             m.weight.requires_grad = False
-        #             m.bias.requires_grad = False
-        #     for m in model.net.vars.parameters():
-        #         if m.ndim == 1:
-        #             m.requires_grad = False
-
         lr = args.lr
-        lr2 = args.lr
-        # model.update_optimizer(lr)
         if args.model == 'fsdgpm' or args.model == 'sam':
             if args.model == 'fsdgpm':
                 model.eta1 = args.eta1
@@ -505,207 +550,57 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
                 model.define_lambda_params()
                 model.update_opt_lambda(model.eta2)
 
-        if args.earlystop:
-            best_loss = np.inf
-            patience = args.lr_patience
-            best_model = copy.deepcopy(model.net.state_dict())
-
-            best_loss_2 = np.inf
-            patience = args.lr_patience
-            model_2.net_copy.load_state_dict(best_model)
 
         o_model = copy.deepcopy(model.net.state_dict())
+        model.old_state = copy.deepcopy(model.net.state_dict())
 
-        for ep in range(args.n_epochs):
-            model.epoch += 1
-            model.real_epoch = ep
-            train_loss = 0.0
-            model.net.train()
-            prog_bar = tqdm(train_loader)
-
-            for (k, (v_x, v_y)) in enumerate(prog_bar):
-                if args.cuda:
-                    v_x = v_x.cuda()
-                    v_y = v_y.cuda()
-                # train gpm_model
-                metadata = model.observe(v_x, v_y, task_info['task'], train_gpm=True)
-                loss = metadata['loss']
-                train_loss += loss * len(v_x)
-
-            train_loss = train_loss / len(train_loader.dataset)
-
-            writer.add_scalar(f"1.Train-LOSS/Task_{task_info['task']}", round(train_loss.item(), 5), model.epoch)
-
-            if args.earlystop:
-                val_loss, val_acc = evaluator(model, val_tasks, args, task_info['task'])
-                valid_loss = val_loss[-1].item()
-
-                writer.add_scalar(f"2.Val-LOSS/Task_{task_info['task']}", round(valid_loss, 5), model.epoch)
-                writer.add_scalar(f"2.Val-ACC/Task_{task_info['task']}", 100 * val_acc[-1], model.epoch)
-
-                if valid_loss < best_loss:
-                    best_loss = valid_loss
-                    best_model = copy.deepcopy(model.net.state_dict())
-                    patience = args.lr_patience
-                else:
-                    patience -= 1
-                    if patience <= 0:
-                        lr /= args.lr_factor
-                        print('** lr={:.1e} **|'.format(lr), end='')
-                        if lr < args.lr_min:
-                            break
-                        patience = args.lr_patience
-                        model.update_optimizer(lr)
-                        if args.model == 'fsdgpm' or args.model == 'sam':
-                            if args.model == 'fsdgpm':
-                                model.eta1 = model.eta1 / args.lr_factor
-                            if len(model.M_vec) > 0 and args.method in ['dgpm', 'xdgpm']:
-                                model.eta2 = model.eta2 / args.lr_factor
-                                model.update_opt_lambda(model.eta2)
-                
-                prog_bar.set_description(
-                    "Task: {} | Epoch: {}/{} | p_model: time={:2.2f}s | Train: loss={:.3f} | Valid: loss={:.3f}, acc={:5.1f}% |".format(
-                        task_info['task'], ep + 1, model.n_epochs, model.iter, time.time() - clock0,
-                        round(train_loss.item(), 5), round(valid_loss, 5), 100 * val_acc[-1])
-                )
-            else:
-                prog_bar.set_description(
-                    "Task: {} | Epoch: {}/{} | time={:2.2f}s | Train: loss={:.3f} |".format(task_info['task'],
-                        ep + 1, model.n_epochs, model.iter, time.time() - clock0, round(train_loss.item(), 5))
-                )
-            if args.earlystop:
-                model.net.load_state_dict(copy.deepcopy(best_model))
+        # train 1st model using gpm
+        model = train_task_loader(model, task_info, evaluator, train_loader, val_tasks, use_gpm=True, args=args)
+        
+        # save gpm_model
         gpm_model = copy.deepcopy(model.net.state_dict())
 
-        # Test first model
-        clock1 = time.time()
-        t_loss, t_acc = evaluator(model, test_tasks, args)
-        result_test_a.append(t_acc)
-        result_test_t.append(task_info["task"])
 
-        avg = sum(t_acc[:(i + 1)]) / (i + 1)
-        bwt = np.mean((np.array(t_acc[:(i+1)]) - np.diag(result_test_a[:(i+1)])))
-
-        print('-' * 60)
-        print('1st Test Result: ACC={:5.3f}%, BWT={:5.3f}%, Elapsed time = {:.2f} s'.format(100 * avg, 100 * bwt,
-                                                                                        time.time() - clock1))
-        print('-' * 60)
-
-        if i >= 0:
-            # Train second model without gpm
-            model.net.load_state_dict(o_model)
-            for ep in range(args.n_epochs):
-
-                model.epoch += 1
-                model.real_epoch = ep
-                model.update_optimizer(lr)
-
-                train_loss = 0.0
-                reg_term = 0.0
-                model.net.train()
-                prog_bar = tqdm(train_loader)
-
-                for (k, (v_x, v_y)) in enumerate(prog_bar):
-                    if args.cuda:
-                        v_x = v_x.cuda()
-                        v_y = v_y.cuda()
-
-                    # train gpm_model
-                    metadata = model.observe(v_x, v_y, task_info['task'], train_gpm=False, old_model=o_model)
-                    loss = metadata['loss']
-                    train_loss += loss * len(v_x)
-                    if task_info['task'] > 0:
-                        reg_term += model.reg_term.item() * len(v_x)
-                
-                train_loss = train_loss / len(train_loader.dataset)
-                reg_term = reg_term / len(train_loader.dataset)
-                writer.add_scalar(f"1.Train-LOSS/Task_{task_info['task']}", round(train_loss.item(), 5), model.epoch)
-
-                if args.earlystop:
-                    val_loss, val_acc = evaluator(model, val_tasks, args, task_info['task'])
-                    valid_loss = val_loss[-1].item()
-
-                    writer.add_scalar(f"2.Val-LOSS/Task_{task_info['task']}", round(valid_loss, 5), model.epoch)
-                    writer.add_scalar(f"2.Val-ACC/Task_{task_info['task']}", 100 * val_acc[-1], model.epoch)
-
-                    if valid_loss < best_loss:
-                        best_loss = valid_loss
-                        best_model = copy.deepcopy(model.net.state_dict())
-                        patience = args.lr_patience
-                    else:
-                        patience -= 1
-                        if patience <= 0:
-                            lr /= args.lr_factor
-                            print('** lr={:.1e} **|'.format(lr), end='')
-                            if lr < args.lr_min:
-                                break
-                            patience = args.lr_patience
-                            model.update_optimizer(lr)
-                    
-                    prog_bar.set_description(
-                        "Task: {} | Epoch: {}/{} | q_model: time={:2.2f}s | Train: loss={:.3f} | reg_term={:.3f}, acc={:5.1f}% |".format(
-                            task_info['task'], ep + 1, model.n_epochs, model.iter, time.time() - clock0,
-                            round(train_loss.item(), 5), round(reg_term, 5), 100 * val_acc[-1])
-                    )
-                else:
-                    prog_bar.set_description(
-                        "Task: {} | Epoch: {}/{} | time={:2.2f}s | Train: loss={:.3f} |".format(task_info['task'],
-                            ep + 1, model.n_epochs, model.iter, time.time() - clock0, round(train_loss.item(), 5))
-                    )
-                if args.earlystop:
-                    model.net.load_state_dict(copy.deepcopy(best_model))
+        if i > 0:
+            # train 2nd model without gpm
+            model = train_task_loader(model, task_info, evaluator, train_loader, val_tasks, use_gpm=False, args=args)
+            # save no_gpm_model
             no_gpm_model = copy.deepcopy(model.net.state_dict())
-            # Test second model
-
-            clock1 = time.time()
-            t_loss, t_acc_1 = evaluator(model, test_tasks, args)
-            result_test_a_1.append(t_acc_1)
-            result_test_t_1.append(task_info["task"])
-
-            avg = sum(t_acc_1[:(i + 1)]) / (i + 1)
-            # bwt = np.mean((np.array(t_acc_1[:(i+1)]) - np.diag(result_test_a_1[:(i+1)])))
-            print((np.array(t_acc_1[:(i+1)]).shape))
-            print(np.diag(result_test_a_1[:(i+1)]).shape)
-            bwt = np.mean((np.array(t_acc_1[:(i+1)]) - np.diag(result_test_a_1[:(i+1)])))
-
-
-
-            print('-' * 60)
-            print('Test Result: ACC={:5.3f}%, BWT={:5.3f}%, Elapsed time = {:.2f} s'.format(100 * avg, 100 * bwt,
-                                                                                            time.time() - clock1))
-            print('-' * 60)
-
-
+            
+            # interpolate
             final_model = copy.deepcopy(model.net.state_dict())
             beta = 1.0 / (i+1)
 
             for key in model.net.state_dict():
                 if 'lambda' not in key:
                     # print(f'Interpolate on layer: {key}')
-                    final_model[key] = beta * gpm_model[key] + (1 - beta) * no_gpm_model[key]
+                    sim = F.cosine_similarity(F.normalize(gpm_model[key].view(1, -1)), F.normalize(no_gpm_model[key].view(1, -1)))
+                    print(f'similarity in layer: {key}: {sim.cpu().item()}')
+                    beta /= sim.cpu().item()
+                    final_model[key] = min(1, beta) * gpm_model[key] + max(0, (1 - beta)) * no_gpm_model[key]
             model.net.load_state_dict(final_model)
 
-            # Test third model
+            t_loss, t_acc = evaluator(model, test_tasks, args)
+            result_test_a.append(t_acc)
+            result_test_t.append(task_info["task"])
 
-            clock1 = time.time()
-            t_loss, t_acc_2 = evaluator(model, test_tasks, args)
-            result_test_a_2.append(t_acc_2)
-            result_test_t_2.append(task_info["task"])
-
-            avg = sum(t_acc_2[:(i + 1)]) / (i + 1)
-            bwt = np.mean((np.array(t_acc_2[:(i+1)]) - np.diag(result_test_a_2[:(i+1)])))
-
-            # writer.add_scalar(f"0.Test/Avg-ACC", 100 * avg, i)
-            # writer.add_scalar(f"0.Test/Avg-BWT", 100 * bwt, i)
-
-            # for j in range(len(result_test_a)):
-            #     writer.add_scalar(f"0.Test-LOSS/Task_{j}", t_loss[j].item(), i)
-            #     writer.add_scalar(f"0.Test-ACC/Task_{j}", 100 * t_acc[j].item(), i)
-            #     writer.add_scalar(f"0.Test-BWT/Task_{j}", 100 * (t_acc[j] - result_test_a[j][j]), i)
+            avg = sum(t_acc[:(i + 1)]) / (i + 1)
+            bwt = np.mean((np.array(t_acc[:(i+1)]) - np.diag(result_test_a[:(i+1)])))
 
             print('-' * 60)
-            print('Interpolated Model Test Result: ACC={:5.3f}%, BWT={:5.3f}%, Elapsed time = {:.2f} s'.format(100 * avg, 100 * bwt,
-                                                                                            time.time() - clock1))
+            print('final model => Test Result: ACC={:5.3f}%, BWT={:5.3f}%'.format(100 * avg, 100 * bwt))
+            print('-' * 60)
+        else:
+            t_loss, t_acc = evaluator(model, test_tasks, args)
+            result_test_a.append(t_acc)
+            
+            result_test_t.append(task_info["task"])
+
+            avg = sum(t_acc[:(i + 1)]) / (i + 1)
+            bwt = np.mean((np.array(t_acc[:(i+1)]) - np.diag(result_test_a[:(i+1)])))
+
+            print('-' * 60)
+            print('final model => Test Result: ACC={:5.3f}%, BWT={:5.3f}%'.format(100 * avg, 100 * bwt))
             print('-' * 60)
 
         # Update Memory of Feature Space
@@ -722,9 +617,9 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
             # Update basis of Feature Space
             model.set_gpm_by_svd(thres)
 
-            # Get the info of GPM
-            for p in range(len(model.M_vec)):
-                writer.add_scalar(f"3.MEM-Total/Layer_{p}", model.M_vec[p].shape[1], i)
+            # # Get the info of GPM
+            # for p in range(len(model.M_vec)):
+            #     writer.add_scalar(f"3.MEM-Total/Layer_{p}", model.M_vec[p].shape[1], i)
 
             print('Spend Time = {:.2f} s'.format(time.time() - clock2))
             print('-' * 60)
@@ -737,7 +632,7 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
         100 * avg, 100 * bwt, time_spent / 60))
     print('*' * 100)
 
-    return torch.Tensor(result_test_t_2), torch.Tensor(result_test_a_2), time_spent
+    return torch.Tensor(result_test_t), torch.Tensor(result_test_a), time_spent
 
 
 def main():
