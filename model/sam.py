@@ -35,7 +35,7 @@ class Net(BaseNet):
         return output
 
 
-    def observe(self, x, y, t, train_gpm=True):
+    def observe(self, x, y, t, train_gpm=True, old_model=None):
         if t != self.current_task:
             self.current_task = t
         self.net.train()
@@ -54,29 +54,42 @@ class Net(BaseNet):
 
             fast_weights = None
             fast_weights = self.compute_w_adv(x, y, t, fast_weights)
-            metadata = self.meta_loss(bx, by, bt, fast_weights)
-            loss = metadata['loss']
+            
+            metadata = {}
+
             # metadata['reg_term'] = 0.0
 
-            if not train_gpm:
+            if train_gpm is False:
+
+                loss = self.meta_loss(bx, by, bt, fast_weights)['loss']
+
                 _ = self.net.forward(bx, fast_weights)
                 z_new = self.net.feature_output
-                _ = self.net_old.forward(bx)
-                z_old = self.net_old.feature_output
+
+                # assert old_model is not None, f'Missing old_model param: {type(old_model)}'
+                # self.net_old.load_state_dict(old_model)
+                with torch.no_grad():
+                    _ = self.net_old.forward(bx)
+                    z_old = self.net_old.feature_output
 
                 # compute reg_term
+                # print('aaaaaaaaaaaaaaaaaaaaaaa')
                 assert z_new.shape == z_old.shape, f'Not the same shape: z_new: {z_new.shape} != z_old: {z_old.shape}'
-                # print(f"f1 = {z_new.shape}, f2 = {z_old.shape}")
-                reg_term = 1.0 / x.size(0) * (torch.norm(z_new - z_old) ** 2)
-                # print('reg_term = ', reg_term.item())
+                reg_term = 1.0 / bx.size(0) * (torch.norm(z_new - z_old.detach()) ** 2)
                 loss += self.eta3 * reg_term
-                metadata['loss'] = loss
                 reg_terms.append(reg_term)
+                metadata['loss'] = loss
+                
+                # print(f'reg_term: {reg_term}')
+
+                self.zero_grads()
                 loss.backward()
                 
                 torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.grad_clip_norm)
                 self.optimizer.step()
             else:
+                metadata = self.meta_loss(bx, by, bt, fast_weights)
+                loss = metadata['loss']
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.grad_clip_norm)
                 if len(self.M_vec) > 0:
@@ -96,7 +109,7 @@ class Net(BaseNet):
 
                     # train on the rest of subspace spanned by GPM
                     self.train_restgpm()
-                    # torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.grad_clip_norm)
+                    torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.grad_clip_norm)
                     self.optimizer.step()
                 else:
                     self.optimizer.step()
@@ -109,7 +122,7 @@ class Net(BaseNet):
                 # instead of pushing every epoch
         
         metadata['reg_term'] = torch.mean(torch.tensor(reg_terms)).item()    
-
+        # print(f"metadata['reg_term']: {metadata['reg_term']}")
         return metadata
     def compute_w_adv(self, x, y, t, fast_weights):
         loss = self.take_loss(x, y, t, fast_weights)
