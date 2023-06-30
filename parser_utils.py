@@ -83,8 +83,7 @@ def get_parser():
 
     parser.add_argument('--eta1', type=float, default=1e-2, help='update step size of weight perturbation')
     parser.add_argument('--eta2', type=float, default=1e-2, help='learning rate of lambda(soft weight for basis)')
-    parser.add_argument('--lambda_at', type=float, default=0.0, help='adversarial regularization term')
-    parser.add_argument('--lambda_rar', type=float, default=0.8, help='gradient penalty term')
+    parser.add_argument('--lambda_at', type=float, default=0.8, help='gradient penalty term')
 
     parser.add_argument('--lam_init', type=float, default=1.0, help='temperature for sigmoid')
     parser.add_argument('--tmp', type=float, default=10, help='temperature for sigmoid')

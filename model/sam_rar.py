@@ -34,48 +34,6 @@ class Net(BaseNet):
                 output[:, offset2:self.n_outputs].data.fill_(-10e10)
 
         return output
-    def fgsm_attack(self, images, labels, tasks, eps, buffer=False) :
-
-        # print(images.requires_grad)
-        self.net.eval()
-        
-        # with torch.no_grad():
-        images_ = images.detach()
-        
-        # for _ in range(1):
-            # images_ = images_.detach()
-        images_.requires_grad = True
-
-        outputs = self.net(images_)
-        
-        self.net.zero_grad()
-
-        if not buffer:
-            cost = self.loss_criterion(outputs, labels)
-        else:
-            cost = self.meta_loss(images_, labels, tasks)
-
-        cost.backward()
-        
-        images_ = images_ + eps * images_.grad.sign()
-        images_ = torch.clamp(images_, 0, 1)
-        
-        self.net.train()
-        return images_
-    
-    def pgd_linf(self, X, y, t, epsilon=0.1, alpha=0.01, num_iter=2, buffer=True):
-        """ Construct FGSM adversarial examples on the examples X"""
-        delta = torch.zeros_like(X, requires_grad=True)
-            
-        for it in range(num_iter):
-            if not buffer:
-                loss = nn.CrossEntropyLoss()(self.net(X + delta), y)
-            else:
-                loss = self.meta_loss(X + delta, y, t)
-            loss.backward()
-            delta.data = (delta + alpha * delta.grad.detach().sign()).clamp(-epsilon,epsilon)
-            delta.grad.zero_()
-        return delta.detach()
     
     def compute_loss_with_SAM(self, x, y, t, use_SAM=True):
         fast_weights = None
@@ -85,6 +43,46 @@ class Net(BaseNet):
 
         return loss
 
+    def mifgsm_attack(self, input, data_grad, eps=0.1, num_iter=10):
+        num_iter = 10
+        decay_factor = 1.0
+        pert_out = input
+        alpha = eps / num_iter
+        g = 0
+        for i in range(num_iter - 1):
+            g = decay_factor * g + data_grad / (torch.norm(data_grad,p=1) + 1e-6)
+            pert_out = pert_out + alpha * torch.sign(g)
+            pert_out = torch.clamp(pert_out, 0, 1)
+            
+            if torch.norm((pert_out-input),p=float('inf')) > eps:
+                break
+        return pert_out
+    def pairing(self, new_data, buffer):
+        '''
+            For each example in buffer, find the example with the different label and nearest to the this buffer's example
+        '''
+        x_new, y_new = new_data[0], new_data[1]
+        x_old, y_old = buffer[0], buffer[1]
+
+        nearest_indices = []
+        for i in range(len(x_old)):
+            a = x_old[i]
+            label_a = y_old[i]
+
+            # Calculate L2 distances
+            distances = torch.norm(x_new - a, dim=1)  # Compute L2 distances
+            mask = (y_new != label_a)  # Mask elements with different labels
+            # print(f'mask: {mask}')
+            distances[mask == 0] = float('inf')
+            nearest_index = torch.argmin(distances)
+            # print(f'nearest_index: {nearest_index.item()}')
+            nearest_indices.append(nearest_index.item())
+
+        # Get the nearest elements from x_new
+
+        assert not (y_new[nearest_indices] == y_old).any()
+
+        return nearest_indices
     def observe(self, x, y, t):
         if t != self.current_task:
             self.current_task = t
@@ -103,7 +101,11 @@ class Net(BaseNet):
             (x_n, y_n, t_n), (x_o, y_o, t_o) = self.get_batch(x, y, t)  # 
             
             metadata = {
-                'loss_theta^': 0.0
+                'loss_theta^': 0.0,
+                'loss_new': 0.0,
+                'loss_old': 0.0,
+                'loss_rar': 0.0,
+                'loss_all': 0.0
             }
             
             # update model => theta^' - Eq(5)
@@ -143,9 +145,59 @@ class Net(BaseNet):
                 _ = self.net.forward(x_o)
                 feat_old = self.net.feat_out
 
-                print(f'feat_new: {feat_new.shape} - feat_out: {feat_old.shape}')
+                # print(f'feat_new: {feat_new.shape} - feat_out: {feat_old.shape}')
 
                 argmin_idx = self.pairing([feat_new, y_n], [feat_old, y_o])
+
+                x_n_pair = x_n[argmin_idx]
+                y_n_pair = y_n[argmin_idx]
+                t_n_pair = t_n[argmin_idx]
+
+                x_o_d = x_o.clone().detach()
+                x_o_d.requires_grad = True
+
+                _ = self.net.forward(x_n_pair)
+                feat_new = self.net.feat_out
+                _ = self.net.forward(x_o_d)
+                feat_old = self.net.feat_out
+
+                L2 = torch.sum(torch.norm(feat_new - feat_old, p=2))
+                L2.backward()
+
+                data_grad = x_o_d.grad.data
+
+                x_o_adv = self.mifgsm_attack(x_o_d, data_grad)
+
+                loss_rar = self.compute_loss_with_SAM(x_o_adv, y_o, t_o)
+                loss_old = self.compute_loss_with_SAM(x_o, y_o, t_o)
+                loss_new = self.compute_loss_with_SAM(x_n, y_n, t_n)
+                loss_all = loss_new + self.lambda_at * loss_old + (1-self.lambda_at) *  loss_rar
+
+                loss_all.backward()
+
+                metadata['loss_all'] = loss_all.item()
+                metadata['loss_rar'] = loss_rar.item()
+                metadata['loss_new'] = loss_new.item()
+                metadata['loss_old'] = loss_old.item()
+
+                if len(self.M_vec) > 0:
+                # update the lambdas
+                    if self.args.method in ['dgpm', 'xdgpm']:
+                        torch.nn.utils.clip_grad_norm_(self.lambdas.parameters(), self.args.grad_clip_norm)
+                        if self.args.sharpness:
+                            self.opt_lamdas.step()
+                        else:
+                            self.opt_lamdas_step()
+
+                        for idx in range(len(self.lambdas)):
+                            self.lambdas[idx] = nn.Parameter(torch.sigmoid(self.args.tmp * self.lambdas[idx]))
+                    self.train_restgpm()
+                    torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.grad_clip_norm)
+                    self.optimizer.step()
+                else:
+                    self.optimizer.step()
+
+                self.zero_grads()
 
         return metadata
     def compute_w_adv(self, x, y, t, fast_weights):
@@ -284,20 +336,3 @@ class Net(BaseNet):
         return
     def count_parameters(self):
         return sum(p.numel() for p in self.net.parameters())
-    def pairing(self, new_data, buffer):
-        '''
-            For each example in buffer, find the example with the different label and nearest to the this buffer's example
-        '''
-        x_new, y_new = new_data[0], new_data[1]
-        x_old, y_old = buffer[0], buffer[1]
-
-        x_new_ex = x_new.unsqueeze(0)
-        x_old_ex = x_old.unsqueeze(1)
-        dist = F.pairwise_distance(x_old_ex, x_new_ex)
-
-        mask = y_old.unsqueeze(1) != y_new.unsqueeze(0)
-        dist_masked = torch.where(mask, dist, float('inf'))
-
-        _, argmin_idx = torch.min(dist_masked, dim=1)
-
-        return argmin_idx

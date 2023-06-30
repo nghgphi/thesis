@@ -14,10 +14,10 @@ SAM='--model sam_rar --sharpness --method xdgpm --expt_name test_sam_at --rho 0.
 
 # python main.py $PMNIST --seed $SEED $FSDGPM --memories 200 --lr 0.01 --eta1 0.05 --eta2 0.01 
 echo 'run sam on all losses'
-CUDA_VISIBLE_DEVICES=1 python main_new_at_rar.py $CIFAR \
+CUDA_VISIBLE_DEVICES=1 python main_new_at_rar.py $PMNIST \
                             $SAM \
                             --seed $SEED \
                             --lr 0.01 \
                             --eta2 0.01 \
-                            --lambda_rar 0.5 \
+                            --lambda_at 0.5 \
                             --data_path ../../../vinai/phinh2 
