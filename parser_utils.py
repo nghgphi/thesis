@@ -8,7 +8,7 @@ def get_parser():
     parser.add_argument('--expt_name', type=str, default='debug', help='name of the experiment')
 
     # experiment parameters
-    parser.add_argument('--model', default='fsdgpm', type=str, required=True, choices=['fsdgpm', 'ER', 'sam'], help='Select model: FS-DGPM, SAM, ER')
+    parser.add_argument('--model', default='fsdgpm', type=str, required=True, choices=['fsdgpm', 'ER', 'sam', 'sam_rar'], help='Select model: FS-DGPM, SAM, ER')
     parser.add_argument('--cuda', default=False, action='store_true', help='Use GPU')
     parser.add_argument('--seed', type=int, default=0, help='random seed of model')
     parser.add_argument('--device', default='cuda:0', type=str, help='gpu id')
@@ -83,7 +83,8 @@ def get_parser():
 
     parser.add_argument('--eta1', type=float, default=1e-2, help='update step size of weight perturbation')
     parser.add_argument('--eta2', type=float, default=1e-2, help='learning rate of lambda(soft weight for basis)')
-    parser.add_argument('--eta3', type=float, default=1e-2, help='feature regularization term')
+    parser.add_argument('--lambda_at', type=float, default=0.0, help='adversarial regularization term')
+    parser.add_argument('--lambda_rar', type=float, default=0.8, help='gradient penalty term')
 
     parser.add_argument('--lam_init', type=float, default=1.0, help='temperature for sigmoid')
     parser.add_argument('--tmp', type=float, default=10, help='temperature for sigmoid')
@@ -97,23 +98,23 @@ def get_parser():
     parser.add_argument('--use_track', type=str2bool, default=True)
     parser.add_argument('--freeze_bn', default=False, action='store_true', help='')
     parser.add_argument('--second_order', default=False, action='store_true', help='')
-    parser.add_argument('--activation_name', type=str, default=None, choices=['parametric_softplus', 'low_softplus', 'softplus'], help='Name of activation function')
-    parser.add_argument('--clip_bn', default=False, action='store_true', help='')
-    parser.add_argument('--use_conv_wrapper', default=False, action='store_true', help='')
-    parser.add_argument("--reg_gnorm", 
-                        type=float, 
-                        default=1e-3,
-                        help="gradnorm regularization strength")
+    # parser.add_argument('--activation_name', type=str, default=None, choices=['parametric_softplus', 'low_softplus', 'softplus'], help='Name of activation function')
+    # parser.add_argument('--clip_bn', default=False, action='store_true', help='')
+    # parser.add_argument('--use_conv_wrapper', default=False, action='store_true', help='')
+    # parser.add_argument("--reg_gnorm", 
+    #                     type=float, 
+    #                     default=1e-3,
+    #                     help="gradnorm regularization strength")
 
-    parser.add_argument("--reg_beta", 
-                        type=float, 
-                        default=1e-2,
-                        help="regularization constant for beta parameters")
+    # parser.add_argument("--reg_beta", 
+    #                     type=float, 
+    #                     default=1e-2,
+    #                     help="regularization constant for beta parameters")
     
-    parser.add_argument("--reg_gamma", 
-                        type=float, 
-                        default=1e-2,
-                        help="regularization constant for gamma parameters")
+    # parser.add_argument("--reg_gamma", 
+    #                     type=float, 
+    #                     default=1e-2,
+    #                     help="regularization constant for gamma parameters")
 
     # visualization of loss landscape
     parser.add_argument('--visual_landscape', default=False, action='store_true', help='')

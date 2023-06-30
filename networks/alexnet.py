@@ -42,7 +42,7 @@ class Learner(nn.Module):
 
         self.head = torch.nn.Linear(2048, self.n_outputs, bias=False)
 
-        self.feature_output = None
+        self.feat_out = None
         # number of representation matrix
         self.n_rep = 5
         self.multi_head = True
@@ -65,7 +65,7 @@ class Learner(nn.Module):
             h = self.maxpool(self.drop2(self.relu(h)))
             h = h.reshape(x.size(0), -1)
 
-            self.feature_output = h
+            self.feat_out = h
 
 
             y.append(h)
@@ -78,7 +78,7 @@ class Learner(nn.Module):
                 h = self.maxpool(self.drop2(self.relu(self.F_conv(self.conv3, h, vars[2]))))
 
                 h = h.reshape(x.size(0), -1)
-                self.feature_output = h
+                self.feat_out = h
 
                 h = self.drop2(self.relu(F.linear(h, vars[3])))
                 h = self.drop2(self.relu(F.linear(h, vars[4])))
@@ -94,7 +94,7 @@ class Learner(nn.Module):
                 h = self.maxpool(self.drop2(self.relu(self.F_conv(self.conv3, h, vars[4]))))
 
                 h = h.reshape(x.size(0), -1)
-                self.feature_output = h
+                self.feat_out = h
 
                 h = self.drop2(self.relu(F.linear(h, vars[5])))
                 h = self.drop2(self.relu(F.linear(h, vars[6])))
@@ -105,7 +105,7 @@ class Learner(nn.Module):
             h = self.maxpool(self.drop2(self.relu(self.conv3(h))))
             h = h.reshape(x.size(0), -1)
 
-            self.feature_output = h
+            self.feat_out = h
 
             h = self.drop2(self.relu(self.fc1(h)))
             h = self.drop2(self.relu(self.fc2(h)))

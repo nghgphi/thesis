@@ -20,11 +20,14 @@ class Learner(nn.Module):
         # number of representation matrix
         self.n_rep = 3
         self.multi_head = False
-        self.feature_output = None
+        self.feat_out = None
  
 
     def forward(self, x, vars=None, svd=False):
+        # print(f'h shape_1: {x.shape}')
+
         h = x.reshape(x.size(0), -1)
+        # print(f'h shape: {h.shape}')
         if svd:
             y = []
             y.append(h)
@@ -32,20 +35,20 @@ class Learner(nn.Module):
             y.append(h)
             h = self.relu(self.fc2(h))
             
-            self.feature_output = h
+            self.feat_out = h
             
             y.append(h)
         elif vars is not None:
             assert len(vars) == 3
             h = self.relu(F.linear(h, vars[0]))
             h = self.relu(F.linear(h, vars[1]))
-            self.feature_output = h
+            self.feat_out = h
 
             y = F.linear(h, vars[2])
         else:
             h = self.relu(self.fc1(h))
             h = self.relu(self.fc2(h))
-            self.feature_output = h
+            self.feat_out = h
 
             y = self.head(h)
 

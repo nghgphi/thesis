@@ -4,6 +4,7 @@ import numpy as np
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from model.base import *
 
@@ -12,8 +13,9 @@ class Net(BaseNet):
         super(Net, self).__init__(n_inputs, n_outputs, n_tasks, args)
         
         self.eta2 = args.eta2
-        self.eta3 = args.eta3
         self.args = args
+        self.lambda_at = args.lambda_at
+        self.lambda_gp = args.lambda_gp
         self.batch_size = args.batch_size
         
         self.update_optimizer()
@@ -33,13 +35,60 @@ class Net(BaseNet):
                 output[:, offset2:self.n_outputs].data.fill_(-10e10)
 
         return output
+    def fgsm_attack(self, images, labels, tasks, eps, buffer=False) :
 
+        # print(images.requires_grad)
+        self.net.eval()
+        
+        # with torch.no_grad():
+        images_ = images.detach()
+        
+        images_.requires_grad = True
 
-    def observe(self, x, y, t, train_gpm=True, old_model=None):
+        outputs = self.net(images_)
+        
+        self.net.zero_grad()
+
+        if not buffer:
+            cost = self.loss_criterion(outputs, labels)
+        else:
+            cost = self.meta_loss(images_, labels, tasks)
+
+        cost.backward()
+        
+        images_ = images_ + eps * images_.grad.sign()
+        images_ = torch.clamp(images_, 0, 1)
+        
+        self.net.train()
+        return images_
+    
+    def pgd_linf(self, X, y, t, epsilon=0.1, alpha=0.01, num_iter=2, buffer=True):
+        """ Construct FGSM adversarial examples on the examples X"""
+        delta = torch.zeros_like(X, requires_grad=True)
+            
+        for it in range(num_iter):
+            if not buffer:
+                loss = nn.CrossEntropyLoss()(self.net(X + delta), y)
+            else:
+                loss = self.meta_loss(X + delta, y, t)
+            loss.backward()
+            delta.data = (delta + alpha * delta.grad.detach().sign()).clamp(-epsilon,epsilon)
+            delta.grad.zero_()
+        return delta.detach()
+    
+    def compute_loss_with_SAM(self, x, y, t, use_SAM=True):
+        fast_weights = None
+        if use_SAM:
+            fast_weights = self.compute_w_adv(x, y, t, fast_weights)
+        loss = self.meta_loss(x, y, t, fast_weights)
+
+        return loss
+
+    def observe(self, x, y, t):
         if t != self.current_task:
             self.current_task = t
         self.net.train()
-        self.net_old.eval()
+
         reg_terms = []
         for pass_itr in range(self.glances):
             self.iter += 1
@@ -50,82 +99,127 @@ class Net(BaseNet):
             x = x[perm]
             y = y[perm]
             
-            bx, by, bt = self.get_batch(x, y, t)  # from a batch, recreate a new batch from this and some example from old examples
-
-            fast_weights = None
-            fast_weights = self.compute_w_adv(x, y, t, fast_weights)
+            (x_n, y_n, t_n), (x_o, y_o, t_o) = self.get_batch(x, y, t)  # 
             
-            metadata = {}
+            metadata = {
+                'loss_old': 0.0,
+                'loss_new': 0.0,
+                'loss_at_new': 0.0,
+                'loss_at_old': 0.0,
+                'gradient_penalty': 0.0
+            }
+            # print(x_n.shape)
+            
+            # _____________loss CE on new data => SAM___________________
+            loss_new = self.compute_loss_with_SAM(x_n, y_n, t_n, use_SAM=True)
+            metadata['loss_new'] = loss_new.item()
+            
+            # _____________loss AT on new data: => no SAM_______________
+            delta_n = self.pgd_linf(x_n, y_n, t_n, buffer=False)
+            x_n_at = x_n + delta_n
+            loss_at_new = self.compute_loss_with_SAM(x_n_at, y_n, t_n, use_SAM=False)
+            metadata['loss_at_new'] = loss_at_new.item()
+                # total_loss = loss_new + loss_old + self.lambda_at * loss_at_old + self.lambda_at * loss_at_new  + self.lambda_gp * gradient_penalty
+                # total_loss = loss_new + loss_old + self.lambda_at * loss_at_old + self.lambda_at * loss_at_new  
+            # else:
+                # total_loss = loss_new 
+                # total_loss = loss_new + self.lambda_at * loss_at_new
+            sum_loss_new = self.lambda_at * loss_at_new + loss_new
+            sum_loss_new.backward()
+            # print(f'metadata: {metadata}')
+            torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.grad_clip_norm)
+            if len(self.M_vec) > 0:
+                argmin_idx = self.pairing([x_n, y_n], [x_o, y_o])
+                print(f'argmin_idx: {argmin_idx.shape}')
 
-            # metadata['reg_term'] = 0.0
+                # update the lambdas
+                if self.args.method in ['dgpm', 'xdgpm']:
+                    torch.nn.utils.clip_grad_norm_(self.lambdas.parameters(), self.args.grad_clip_norm)
+                    if self.args.sharpness:
+                        self.opt_lamdas.step()
+                    else:
+                        self.opt_lamdas_step()
 
-            if train_gpm is False:
-
-                loss = self.meta_loss(bx, by, bt, fast_weights)['loss']
-
-                _ = self.net.forward(bx, fast_weights)
-                z_new = self.net.feature_output
-
-                # assert old_model is not None, f'Missing old_model param: {type(old_model)}'
-                # self.net_old.load_state_dict(old_model)
-                with torch.no_grad():
-                    _ = self.net_old.forward(bx)
-                    z_old = self.net_old.feature_output
-
-                # compute reg_term
-                # print('aaaaaaaaaaaaaaaaaaaaaaa')
-                assert z_new.shape == z_old.shape, f'Not the same shape: z_new: {z_new.shape} != z_old: {z_old.shape}'
-                reg_term = 1.0 / bx.size(0) * (torch.norm(z_new - z_old.detach()) ** 2)
-                loss += self.eta3 * reg_term
-                reg_terms.append(reg_term)
-                metadata['loss'] = loss
-                
-                # print(f'reg_term: {reg_term}')
+                    for idx in range(len(self.lambdas)):
+                        self.lambdas[idx] = nn.Parameter(torch.sigmoid(self.args.tmp * self.lambdas[idx]))
+                # train on the rest of subspace spanned by GPM
+                self.train_restgpm()
+                torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.grad_clip_norm)
+                self.optimizer.step()
 
                 self.zero_grads()
-                loss.backward()
+
                 
+
+                # print(f'self.current_task: {self.current_task}')
+                if len(x_o) > 0:
+                    # _______________loss CE on buffer: => SAM________________
+                    loss_old = self.compute_loss_with_SAM(x_n_at, y_n, t_n, use_SAM=True)
+                    metadata['loss_old'] = loss_old.item()
+
+                    # _______________loss AT on buffer: => no SAM_____________
+                    # x_o_at = self.fgsm_attack(x_o, y_o, t_o, 0.07, buffer=True)
+                    # print(f't_o: {type(t_o)} | {t_o.data}')
+                    delta_o = self.pgd_linf(x_o, y_o, t_o, buffer=True)  
+                    x_o_at = x_o + delta_o
+                    loss_at_old = self.compute_loss_with_SAM(x_n_at, y_n, t_n, use_SAM=False)
+                    metadata['loss_at_old'] = loss_at_old.item()
+
+                    # ________________INTERPOLATE BWT BUFFER AND BUFFER AT => NO SAM________
+                    # if len(x_o.shape) == 2:
+                    #     alpha = torch.Tensor(np.random.random((x_o_at.size(0), 1))).cuda()
+                    # elif len(x_o.shape) == 4:
+                    #     alpha = torch.Tensor(np.random.random((x_o_at.size(0), 1, 1, 1))).cuda()
+                    # # Get random interpolation between real and fake samples
+                    
+                    # interpolates = alpha * x_o + ((1 - alpha) * x_o_at)
+                    # # print(f'alpha: {alpha.shape} | x_o: {x_o.shape} --- x_o_at: {x_o_at.shape} | interpolates: {interpolates.shape}')
+
+                    # interpolates = torch.autograd.Variable(interpolates, requires_grad=True)
+
+                    # output = self.net.forward(interpolates)
+                    # gradients = torch.autograd.grad(
+                    #                                     output,
+                    #                                     interpolates,
+                    #                                     grad_outputs=torch.ones((interpolates.shape[0], self.net.n_outputs)).cuda(),
+                    #                                     create_graph=True,
+                    #                                     retain_graph=True,
+                    #                                     only_inputs=True,
+                    # )[0]
+                    # gradients = gradients.view(gradients.size(0), -1)
+                    # gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+                    # metadata['gradient_penalty'] = gradient_penalty
+
+                sum_loss_old = loss_old + self.lambda_at * loss_at_old 
+                sum_loss_old.backward()
                 torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.grad_clip_norm)
                 self.optimizer.step()
             else:
-                metadata = self.meta_loss(bx, by, bt, fast_weights)
-                loss = metadata['loss']
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.grad_clip_norm)
-                if len(self.M_vec) > 0:
-                    # update the lambdas
-                    if self.args.method in ['dgpm', 'xdgpm']:
-                        torch.nn.utils.clip_grad_norm_(self.lambdas.parameters(), self.args.grad_clip_norm)
-                        if self.args.sharpness:
-                            self.opt_lamdas.step()
-                        else:
-                            self.opt_lamdas_step()
-
-                        for idx in range(len(self.lambdas)):
-                            self.lambdas[idx] = nn.Parameter(torch.sigmoid(self.args.tmp * self.lambdas[idx]))
-
-                    # only use updated lambdas to update weight
-                    
-
-                    # train on the rest of subspace spanned by GPM
-                    self.train_restgpm()
-                    torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.grad_clip_norm)
-                    self.optimizer.step()
-                else:
-                    self.optimizer.step()
-
-                if self.real_epoch == 0:
-                    self.push_to_mem(x, y, torch.tensor(t))
+                self.optimizer.step()
+                
+                
                 self.zero_grads()
+
+                delta_n = self.pgd_linf(x_n, y_n, t_n, buffer=False)
+                x_n_at = x_n + delta_n
+                loss_at_new = self.compute_loss_with_SAM(x_n_at, y_n, t_n, use_SAM=False)
+                metadata['loss_at_new'] = loss_at_new.item()
+
+                loss_at_new.backward()
+                torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.grad_clip_norm)
+                self.optimizer.step()
+
+            if self.real_epoch == 0:
+                self.push_to_mem(x, y, torch.tensor(t))
+            self.zero_grads()
 
                 # only sample and push to replay buffer once for each task's stream
                 # instead of pushing every epoch
         
-        metadata['reg_term'] = torch.mean(torch.tensor(reg_terms)).item()    
         # print(f"metadata['reg_term']: {metadata['reg_term']}")
         return metadata
     def compute_w_adv(self, x, y, t, fast_weights):
-        loss = self.take_loss(x, y, t, fast_weights)
+        loss = self.meta_loss(x, y, t, fast_weights)
         
         if fast_weights is None:
             fast_weights = self.net.get_params()
@@ -260,3 +354,20 @@ class Net(BaseNet):
         return
     def count_parameters(self):
         return sum(p.numel() for p in self.net.parameters())
+    def pairing(self, new_data, buffer):
+        '''
+            For each example in buffer, find the example with the different label and nearest to the this buffer's example
+        '''
+        x_new, y_new = new_data[0], new_data[1]
+        x_old, y_old = buffer[0], buffer[1]
+
+        x_new_ex = x_new.unsqueeze(0)
+        x_old_ex = x_old.unsqueeze(1)
+        dist = F.pairwise_distance(x_old_ex, x_new_ex)
+
+        mask = y_old.unsqueeze(1) != y_new.unsqueeze(0)
+        dist_masked = torch.where(mask, dist, float('inf'))
+
+        _, argmin_idx = torch.min(dist_masked, dim=1)
+
+        return argmin_idx

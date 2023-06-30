@@ -200,13 +200,13 @@ def life_experience(model, data, ids, args):
                                 model.update_opt_lambda(model.eta2)
 
                 
-                prog_bar.set_description(
+                print(
                     "Task: {} | Epoch: {}/{} | time={:2.2f}s | Train_loss={:.3f}| acc={:5.1f}%|".format(
                         i, ep + 1, model.n_epochs, time.time() - clock0, train_loss,100 * valid_acc)
                 )
                 
             else:
-                prog_bar.set_description("Task: {} | Epoch: {}/{} | time={:2.2f}s | Train: loss={:.3f}|".format(
+                print("Task: {} | Epoch: {}/{} | time={:2.2f}s | Train: loss={:.3f}|".format(
                         i, ep + 1, model.n_epochs, time.time() - clock0, round(train_loss.item(), 5))
                     )
             # model.scheduler.step()
@@ -423,8 +423,8 @@ def life_experience_loader(model, inc_loader, args):
                     v_x = v_x.cuda()
                     v_y = v_y.cuda()
 
-                metadata = model.observe(v_x, v_y, task_info['task'])
-                loss = metadata['loss']
+                loss = model.observe(v_x, v_y, task_info['task'])
+                
                 train_loss += loss * len(v_x)
 
             train_loss = train_loss / len(train_loader.dataset)
@@ -458,13 +458,13 @@ def life_experience_loader(model, inc_loader, args):
                                 model.eta2 = model.eta2 / args.lr_factor
                                 model.update_opt_lambda(model.eta2)
 
-                prog_bar.set_description(
+                print(
                     "Task: {} | Epoch: {}/{} | time={:2.2f}s | Train: loss={:.3f} | Valid: loss={:.3f}, acc={:5.1f}% |".format(
                         task_info['task'], ep + 1, model.n_epochs, model.iter, time.time() - clock0,
                         round(train_loss.item(), 5), round(valid_loss, 5), 100 * val_acc[-1])
                 )
             else:
-                prog_bar.set_description(
+                print(
                     "Task: {} | Epoch: {}/{} | time={:2.2f}s | Train: loss={:.3f} |".format(task_info['task'],
                         ep + 1, model.n_epochs, model.iter, time.time() - clock0, round(train_loss.item(), 5))
                 )

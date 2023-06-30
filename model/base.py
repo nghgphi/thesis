@@ -31,23 +31,27 @@ class BaseNet(torch.nn.Module):
             if args.dataset in ['mnist_permutations', 'pmnist']:
                 network = importlib.import_module('networks.mlp')
             elif args.dataset == 'cifar100':
-                if args.activation_name is None:
+                if True:
                     network = importlib.import_module('networks.alexnet')
                 else:
                     network = importlib.import_module('networks.alexnet_spectral')
             elif args.dataset == 'cifar100_superclass':
-                if args.activation_name is None:
+                if True:
                     network = importlib.import_module('networks.lenet')
                 else:
                     # print(args.activation)
                     network = importlib.import_module('networks.lenet_spectral')
             self.net = network.Learner(self.n_inputs, self.n_outputs, self.n_tasks, self.args)
+            # self.net_1 = network.Learner(self.n_inputs, self.n_outputs, self.n_tasks, self.args)
+            # self.net_2 = network.Learner(self.n_inputs, self.n_outputs, self.n_tasks, self.args)
             self.net_old = network.Learner(self.n_inputs, self.n_outputs, self.n_tasks, self.args)
             self.old_state = None
             self.prev_task = 0
             
         if self.cuda:
             self.net = self.net.cuda()
+            # self.net_1 = self.net_1.cuda()
+            # self.net_2 = self.net_2.cuda()
             self.net_old = self.net_old.cuda()
 
         if self.net.multi_head:
@@ -151,8 +155,6 @@ class BaseNet(torch.nn.Module):
 
             Basically CE Loss 
         """
-        # x = x.requires_grad_()
-        # self._apply_hooks_and_init(x.device)
         outputs = self.net.forward(x, fast_weights)
         # self._remove_hooks()
 
@@ -161,6 +163,7 @@ class BaseNet(torch.nn.Module):
         grad_cur_task = 0.0
         grad_prev_tasks = 0.0
         # print(f"Type tasks: {type(tasks)}")
+        # print(f'tasks: {tasks}')
         for task in np.unique(tasks.data.cpu().numpy()):
             task = int(task)
             idx = torch.nonzero(tasks == task).view(-1)
@@ -190,11 +193,9 @@ class BaseNet(torch.nn.Module):
         #     grad_prev_tasks /= (len(np.unique(tasks.data.cpu().numpy())) - 1)
         
         
-        raw_loss = loss / len(y)
-        metadata = {
-            'loss': raw_loss,
-        }
-        return metadata
+        loss /= len(y)
+
+        return loss
 
     def update_optimizer(self, lr=None):
         if lr is None:
@@ -257,6 +258,26 @@ class BaseNet(torch.nn.Module):
                 p = np.random.randint(0, self.age)
                 if p < self.memories:
                     self.M[p] = [batch_x[i], batch_y[i], t]
+    # def fgsm_attack_for_buffer(self, images, labels, tasks, eps) :
+        
+    #     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    #     # print(images.requires_grad)
+    #     images_ = images.detach()
+    #     images_.requires_grad = True
+    #     images_ = images_.to(device)
+
+    #     # print(f'img: {images_.shape}')
+
+        
+    #     self.net.zero_grad()
+    #     cost = self.meta_loss(images_, labels, tasks)['loss']
+    #     cost.backward()
+        
+    #     attack_images = images_ + eps * images_.grad.sign()
+    #     attack_images = torch.clamp(attack_images, 0, 1)
+        
+    #     # print(f'attach_images: {attack_images}')
+    #     return attack_images
 
     def get_batch(self, x, y, t):
         """
@@ -264,9 +285,16 @@ class BaseNet(torch.nn.Module):
             where old data is sampled from the replay buffer
             """
         t = (torch.ones(x.shape[0]).int() * t)
+        
+        # print(f'_______ t = {t}')
+        
+        bx_o = []
+        by_o = []
+        bt_o = []
 
         if len(self.M) > 0:
             MEM = self.M
+            # print(f'MEM: {len(MEM)}')
             order = np.arange(len(MEM))
             np.random.shuffle(order)
             index = order[:min(x.shape[0], len(MEM))]
@@ -276,17 +304,34 @@ class BaseNet(torch.nn.Module):
 
             for k, idx in enumerate(index):
                 ox, oy, ot = MEM[idx]
-                x = torch.cat((x, ox.unsqueeze(0)), 0)
-                y = torch.cat((y, oy.unsqueeze(0)), 0)
-                t = torch.cat((t, ot.unsqueeze(0)), 0)
 
+                # x = torch.cat((x, ox.unsqueeze(0)), 0)
+                # y = torch.cat((y, oy.unsqueeze(0)), 0)
+                # t = torch.cat((t, ot.unsqueeze(0)), 0)
+
+                if len(bx_o) > 0:
+                    bx_o = torch.cat((bx_o, ox.unsqueeze(0)), 0)
+                    by_o = torch.cat((by_o, oy.unsqueeze(0)), 0)
+                    bt_o = torch.cat((bt_o, ot.unsqueeze(0)), 0)
+                else:
+                    bx_o = ox.unsqueeze(0)
+                    by_o = oy.unsqueeze(0)
+                    bt_o = ot.unsqueeze(0)
+
+            if self.cuda:
+                bx_o = bx_o.cuda()
+                by_o = by_o.cuda()
+                bt_o = bt_o.cuda()
+
+            # ox = self.fgsm_attack_for_buffer(ox, oy, ot, 0.07)
         # handle gpus if specified
         if self.cuda:
             x = x.cuda()
             y = y.cuda()
             t = t.cuda()
-
-        return x, y, t
+        
+        return (x, y, t), (bx_o, by_o, bt_o)
+        # return (x, y, t)
 
     def train_restgpm(self):
         """

@@ -548,10 +548,10 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
 
         o_model = copy.deepcopy(model.net.state_dict())
         # train 1st model using gpm
-        model = train_task_loader(model, task_info, evaluator, train_loader, val_tasks, use_gpm=True, args=args, old_model=None)
+        # model = train_task_loader(model, task_info, evaluator, train_loader, val_tasks, use_gpm=True, args=args, old_model=None)
         # save gpm_model
         gpm_model = copy.deepcopy(model.net.state_dict())
-        if i > 0:
+        if i >= 0:
             # train 2nd model without gpm
             print(f'type(o_model): {type(o_model)}')
             model.net.load_state_dict(o_model)
@@ -562,17 +562,17 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
             no_gpm_model = copy.deepcopy(model.net.state_dict())
             
             # interpolate
-            final_model = copy.deepcopy(model.net.state_dict())
-            beta = 1.0 / (i+1)
+            # final_model = copy.deepcopy(model.net.state_dict())
+            # beta = 1.0 / (i+1)
 
-            for key in model.net.state_dict():
-                if 'lambda' not in key:
-                    # print(f'Interpolate on layer: {key}')
-                    sim = F.cosine_similarity(F.normalize(gpm_model[key].view(1, -1)), F.normalize(no_gpm_model[key].view(1, -1)))
-                    print(f'similarity in layer: {key}: {sim.cpu().item()}')
-                    beta /= sim.cpu().item()
-                    final_model[key] = min(1, beta) * gpm_model[key] + max(0, (1 - beta)) * no_gpm_model[key]
-            model.net.load_state_dict(final_model)
+            # for key in model.net.state_dict():
+            #     if 'lambda' not in key:
+            #         # print(f'Interpolate on layer: {key}')
+            #         sim = F.cosine_similarity(F.normalize(gpm_model[key].view(1, -1)), F.normalize(no_gpm_model[key].view(1, -1)))
+            #         print(f'similarity in layer: {key}: {sim.cpu().item()}')
+            #         beta /= sim.cpu().item()
+            #         final_model[key] = min(1, beta) * gpm_model[key] + max(0, (1 - beta)) * no_gpm_model[key]
+            # model.net.load_state_dict(final_model)
 
             t_loss, t_acc = evaluator(model, test_tasks, args)
             result_test_a.append(t_acc)
@@ -598,25 +598,25 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
             print('-' * 60)
 
         # Update Memory of Feature Space
-        if args.model in ['fsdgpm', 'sam']:
-            clock2 = time.time()
+        # if args.model in ['fsdgpm', 'sam']:
+        #     clock2 = time.time()
 
-            # Get threshold
-            thres_value = min(args.thres + i * args.thres_add, args.thres_last)
-            thres = np.array([thres_value] * model.net.n_rep)
+        #     # Get threshold
+        #     thres_value = min(args.thres + i * args.thres_add, args.thres_last)
+        #     thres = np.array([thres_value] * model.net.n_rep)
 
-            print('-' * 60)
-            print('Threshold: ', thres)
+        #     print('-' * 60)
+        #     print('Threshold: ', thres)
 
-            # Update basis of Feature Space
-            model.set_gpm_by_svd(thres)
+        #     # Update basis of Feature Space
+        #     model.set_gpm_by_svd(thres)
 
-            # # Get the info of GPM
-            # for p in range(len(model.M_vec)):
-            #     writer.add_scalar(f"3.MEM-Total/Layer_{p}", model.M_vec[p].shape[1], i)
+        #     # # Get the info of GPM
+        #     # for p in range(len(model.M_vec)):
+        #     #     writer.add_scalar(f"3.MEM-Total/Layer_{p}", model.M_vec[p].shape[1], i)
 
-            print('Spend Time = {:.2f} s'.format(time.time() - clock2))
-            print('-' * 60)
+        #     print('Spend Time = {:.2f} s'.format(time.time() - clock2))
+        #     print('-' * 60)
 
     time_end = time.time()
     time_spent = time_end - time_start

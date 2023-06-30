@@ -46,7 +46,7 @@ class Net(BaseNet):
             y = y[perm]
 
             # get a batch by augmented incoming data with old task data, used for computing tiny-loss
-            bx, by, bt = self.get_batch(x, y, t) # 64 data points
+            (bx, by, bt), (_, _, _) = self.get_batch(x, y, t) # 64 data points
 
             # print(f"len(bx) = {len(bx)}")
             # inner step of sharpness

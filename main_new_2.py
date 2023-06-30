@@ -445,6 +445,7 @@ def train_task_loader(model, task_info, evaluator, train_loader, val_tasks, use_
     if use_gpm:
         model.net.load_state_dict(model.old_state)
         model.net_old.load_state_dict(model.old_state)
+    
     model.update_optimizer(args.lr)
     # print(f'task_info: {task_info}')
     if args.earlystop:
@@ -526,11 +527,15 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
     args.log_dir, args.checkpoint_dir = utils.log_dir(args)
     writer = SummaryWriter(args.log_dir)
 
+    
     for i in range(inc_loader.n_tasks):
         task_info, train_loader, _, _ = inc_loader.new_task()
         # Train
         clock0 = time.time()
+
         lr = args.lr
+        model.update_optimizer(lr)
+
         if args.model == 'fsdgpm' or args.model == 'sam':
             if args.model == 'fsdgpm':
                 model.eta1 = args.eta1
@@ -563,6 +568,7 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
             model.real_epoch = ep
             train_loss = 0.0
             reg_term = 0.0
+            
             prog_bar = tqdm(train_loader)
 
             for (k, (v_x, v_y)) in enumerate(prog_bar):
@@ -713,8 +719,8 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
         else:
             t_loss, t_acc = evaluator(model, test_tasks, args)
             result_test_a.append(t_acc)
-            
             result_test_t.append(task_info["task"])
+
 
             avg = sum(t_acc[:(i + 1)]) / (i + 1)
             bwt = np.mean((np.array(t_acc[:(i+1)]) - np.diag(result_test_a[:(i+1)])))
@@ -724,25 +730,25 @@ def life_experience_loader(model, inc_loader, input_size, n_outputs, n_tasks, ar
             print('-' * 60)
 
         # Update Memory of Feature Space
-        # if args.model in ['fsdgpm', 'sam']:
-        #     clock2 = time.time()
+        if args.model in ['fsdgpm', 'sam']:
+            clock2 = time.time()
 
-        #     # Get threshold
-        #     thres_value = min(args.thres + i * args.thres_add, args.thres_last)
-        #     thres = np.array([thres_value] * model.net.n_rep)
+            # Get threshold
+            thres_value = min(args.thres + i * args.thres_add, args.thres_last)
+            thres = np.array([thres_value] * model.net.n_rep)
 
-        #     print('-' * 60)
-        #     print('Threshold: ', thres)
+            print('-' * 60)
+            print('Threshold: ', thres)
 
-        #     # Update basis of Feature Space
-        #     model.set_gpm_by_svd(thres)
+            # Update basis of Feature Space
+            model.set_gpm_by_svd(thres)
 
-        #     # # Get the info of GPM
-        #     # for p in range(len(model.M_vec)):
-        #     #     writer.add_scalar(f"3.MEM-Total/Layer_{p}", model.M_vec[p].shape[1], i)
+            # # Get the info of GPM
+            # for p in range(len(model.M_vec)):
+            #     writer.add_scalar(f"3.MEM-Total/Layer_{p}", model.M_vec[p].shape[1], i)
 
-        #     print('Spend Time = {:.2f} s'.format(time.time() - clock2))
-        #     print('-' * 60)
+            print('Spend Time = {:.2f} s'.format(time.time() - clock2))
+            print('-' * 60)
 
     time_end = time.time()
     time_spent = time_end - time_start
